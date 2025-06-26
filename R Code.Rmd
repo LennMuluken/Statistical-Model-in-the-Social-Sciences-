@@ -1,0 +1,1320 @@
+---
+title: "R Code"
+date: "2025-06-05"
+output:
+  html_document: default
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Load Packages 
+pacman::p_load("tidyverse", "lme4", "lmerTest", "mlmhelpr", "haven", "sjPlot", "quest", "mlmhelpr", "lattice", "interactions", "ggeffects", "lmtest", "sandwich", "multiwayvcov", "stargazer", "psych", "scales", "merTools", "emmeans", "HLMdiag", "sjPlot", "stringr", "mice", "naniar", "car", "patchwork")
+```
+
+
+```{r}
+#Load Data
+soep <- readRDS("C:/Users/lenn0/AppData/Local/Temp/834af560-b32b-440a-afdf-938e22b26caa_SOEP-CORE.v39eu_R_EN.zip.caa/R_EN/soepdata/pequiv.rds")
+```
+
+
+```{r}
+#Data Wrangling 
+
+#Select variables that will be used in the subsequent analyses 
+soep_sub <- soep %>% 
+  dplyr::select(x11101ll, x11102, d11101, d11102ll, d11104,i11110, syear, d11108) %>% 
+  arrange(x11101ll)
+
+#Assign meaningful names to the variables 
+soep_sub <- soep_sub %>% 
+  rename(id_id = x11101ll) %>%
+  rename(hh_id = x11102) %>%
+  rename(age = d11101) %>%
+  rename(gender = d11102ll) %>%
+  rename(marital_status_unfinished = d11104) %>%
+  rename(income = i11110) %>%
+  rename(year = syear) %>% 
+  rename(education = d11108)
+
+#Count units on each level
+data.frame(
+  level1_observations = nrow(soep_sub),
+  level2_individuals = length(unique(soep_sub$id_id)),
+  level3_households = length(unique(soep_sub$hh_id)))
+```
+
+
+```{r}
+#Data Wrangling 
+
+#Code variables as numeric 
+soep_sub$income <- as.numeric(soep_sub$income)
+soep_sub$age <- as.numeric(soep_sub$age)
+soep_sub$gender <- as.numeric(soep_sub$gender)
+soep_sub$marital_status_unfinished <- as.numeric(soep_sub$marital_status_unfinished)
+soep_sub$education <- as.numeric(soep_sub$education)
+
+#Filter the dataset for NAs and values that are relevant for the subsequent analyses 
+soep_fil <- soep_sub %>%
+  filter(income >= 0) %>%
+  filter(age >= 25 & age <= 60) %>%
+  filter(gender > 0) %>%
+  filter(marital_status_unfinished > 0) %>% 
+  filter(education != -1)
+
+
+#Filter individuals between 25 and 60
+soep_fil1 <- soep_sub %>% 
+  filter(age >= 25 & age <= 60) 
+
+#Recode gender so that male = 1 and female = 0
+soep_fil <- soep_fil %>% 
+  mutate(male = case_when(
+    gender == 1 ~ 1, 
+    gender == 2 ~ 0,
+    TRUE ~ NA_real_))
+
+#Recode marital status so that single = 0 and married = 1 
+soep_fil <- soep_fil %>% 
+  mutate(marital_status = marital_status_unfinished - 1) %>% 
+  mutate(marital_status = case_when(
+    marital_status == 0 ~ 1, 
+    marital_status == 1 ~ 0,
+    TRUE ~ marital_status ))
+
+
+#Recode marital status so that single = 0 and married = 1 
+soep_fil <- soep_fil %>% 
+  mutate(education = education - 1)
+
+soep_fil$education <- as.character(soep_fil$education)
+
+#Create a new variable for which single = 0, married = 1, and other = 2
+soep_fil <- soep_fil %>% 
+  mutate(marital_status_reduced = case_when(
+    marital_status == 0 ~ 0,
+    marital_status == 1 ~ 1, 
+    marital_status > 1 ~ 2
+  ))
+
+#Create a quadratic polynomial of age 
+soep_fil <- soep_fil %>% 
+  mutate(age_squared = age^2)
+
+#Create a variable representing the logarithm of income
+soep_fil <- soep_fil %>%
+  mutate(log_income = case_when(
+    income > 0  ~ log(income),
+    income == 0 ~ 0,
+    TRUE        ~ NA_real_))
+```
+
+
+```{r}
+#Data Wrangling 
+
+#Center age and age-squared 
+soep_fil <- soep_fil %>% 
+  mutate(age_c = age - mean(age, na.rm = T)) %>% 
+  mutate(age_squared_c = age_squared - mean(age_squared, na.rm = T)) 
+```
+
+
+```{r}
+#Data Wrangling 
+
+#Compute mean income for each age group (by years)
+soep_summary1 <- soep_fil %>% 
+  group_by(age) %>% 
+  summarise(mean_income_age = mean(income, na.rm = T), .groups = "drop")
+
+
+#Compute mean income for each age group conditioned on gender 
+soep_summary3 <- soep_fil %>%
+  group_by(age, male) %>%
+  summarise(mean_income_age = mean(income, na.rm = TRUE), .groups = "drop")
+
+
+#Compute mean income for each age group conditioned on gender and marital status 
+soep_summary5 <- soep_fil %>%
+  mutate(gender_marital_status = case_when(
+    male == 0 & marital_status_reduced == 0 ~ "female_single", 
+    male == 0 & marital_status_reduced == 1 ~ "female_married",
+    male == 0 & marital_status_reduced == 2 ~ "female_other",
+    male == 1 & marital_status_reduced == 0 ~ "male_single",
+    male == 1 & marital_status_reduced == 1 ~ "male_married",
+    male == 1 & marital_status_reduced == 2 ~ "male_other")) %>% 
+  group_by(age, gender_marital_status) %>%
+  summarise(mean_income_age_marital_status_gender = mean(income, na.rm = TRUE), .groups = "drop")
+```
+
+
+```{r}
+#Graphical Analysis
+
+#Mean income
+ggplot(soep_summary1, aes(x = age, y = mean_income_age))+
+  geom_line(size =1) + 
+  geom_point() + 
+  labs(
+    title = "Mean Income by Age",
+    x = "Age",
+    y = "Mean Income") +
+  theme_minimal()
+
+ggplot(soep_summary1, aes(x = age, y = mean_income_age))+
+  geom_smooth(size =1) + 
+  labs(
+    title = "Mean Income by Age",
+    x = "Age",
+    y = "Mean Income") +
+  theme_minimal()
+
+
+#Mean income by age and gender
+ggplot(soep_summary3, aes(x = age, y = mean_income_age, color = as.factor(male))) +
+  geom_line(size = 1) +
+  geom_point() +
+  labs(
+    title = "Mean Income by Age and Gender",
+    x = "Age",
+    y = "Mean Income",
+    color = "Gender") +
+  theme_minimal()
+
+ggplot(soep_summary3, aes(x = age, y = mean_income_age, color = as.factor(male))) +
+  geom_smooth(size = 1) +
+  labs(
+    title = "Mean Income by Age and Gender",
+    x = "Age",
+    y = "Mean Income",
+    color = "Gender") +
+  theme_minimal()
+
+
+#Mean income by age, gender, and marital status 
+ggplot(soep_summary5, aes(x = age, y = mean_income_age_marital_status_gender, color = as.factor(gender_marital_status))) +
+  geom_line(size = 1) +
+  geom_point() +
+  labs(
+    title = "Mean Income by Age and Marital Status",
+    x = "Age",
+    y = "Mean Income",
+    color = "Gender and Marital Status") +
+  theme_minimal()
+
+ggplot(soep_summary5, aes(x = age, y = mean_income_age_marital_status_gender, color = as.factor(gender_marital_status))) +
+  geom_smooth(size = 1) +
+  labs(
+    title = "Mean Income by Age and Marital Status",
+    x = "Age",
+    y = "Mean Income",
+    color = "Gender and Marital Status") +
+  theme_minimal()
+```
+
+
+```{r}
+#Filter the dataset for individuals that went from unmarried to married during the course of the panel 
+ids_changed <- soep_fil %>%
+  arrange(id_id, year) %>%
+  group_by(id_id) %>%
+  mutate(prev_marital_status = lag(marital_status_reduced)) %>%
+  filter(prev_marital_status == 0 & marital_status_reduced == 1) %>%
+  distinct(id_id) 
+
+soep_changed <- soep_fil %>%
+  filter(id_id %in% ids_changed$id_id)
+```
+
+
+```{r}
+#Determine the year in which the individual got married 
+soep_d <- soep_fil %>% 
+  arrange(id_id, year) %>% 
+  group_by(id_id) %>% 
+  mutate(prev_marital_status = lag(marital_status_reduced),
+         transition = prev_marital_status == 0 & marital_status_reduced == 1) %>% 
+  filter(transition) %>% 
+  slice(1) %>% 
+  dplyr::select(id_id, transition_year = year) 
+
+
+#Center the variable so that 0 = year of marriage 
+soep_final <- soep_fil %>% 
+  inner_join(soep_d, by = "id_id") %>% 
+  mutate(relative_year = year - transition_year) 
+
+#Once married individuals are permanetly coded as married
+soep_final <- soep_final %>% 
+  arrange(id_id, year) %>% 
+  group_by(id_id) %>% 
+  mutate(married = cummax(marital_status_reduced %in% c(1, 2)))
+```
+
+
+```{r}
+#Count observations on each level
+data.frame(
+  level1_observations = nrow(soep_final),
+  level2_individuals = length(unique(soep_final$id_id)),
+  level3_households = length(unique(soep_final$hh_id)))
+```
+
+
+```{r}
+#Check skew
+describe(soep_final$income)
+describe(soep_final$log_income)
+```
+
+
+```{r}
+#Histogram of income
+ggplot(soep_final, aes(x = income)) +
+  geom_histogram() +
+  labs(
+    title = "Histogram of Income",
+    x = "Income",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+
+#Histogram of log income 
+ggplot(soep_final, aes(x = log_income)) +
+  geom_histogram() +
+  labs(
+    title = "Histogram of Log Income",
+    x = "Log Income",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+soep_final <- soep_final %>%
+  mutate(relative_year_squared = relative_year^2)
+ 
+
+#Standardize variables
+soep_final <- soep_final %>% 
+  mutate(
+    age_sd = (age_c) / sd(age_c, na.rm = TRUE),
+    age_squared_sd = (age_squared_c) / sd(age_squared_c, na.rm = TRUE),
+    married_sd = (married - mean(married, na.rm = TRUE)) / sd(married, na.rm = TRUE),
+    male_sd = (male - mean(male, na.rm = TRUE)) / sd(male, na.rm = TRUE),
+    relative_year_sd = (relative_year - mean(relative_year, na.rm = TRUE)) / sd(relative_year, na.rm = TRUE),
+    relative_year_squared_sd = (relative_year_squared - mean(relative_year_squared, na.rm = TRUE)) / sd(relative_year_squared, na.rm = TRUE))
+
+#Center transition_year
+soep_final <- soep_final %>% 
+  mutate(transition_year = transition_year - 1985)
+
+
+#Convert the variables "male" and "married" to factors 
+soep_final <- soep_final %>%
+  ungroup() %>%
+  mutate(
+    male = factor(male, levels = c(0, 1), labels = c("Female", "Male")),
+    married = factor(married, levels = c(0, 1), labels = c("No", "Yes"))
+  )
+
+#Create a new time variable with 0 = start of the panel
+soep_final <- soep_final %>% 
+  mutate(year_1984 = year - 1984)
+
+soep_final$education <- factor(soep_final$education)
+```
+
+
+
+```{r}
+# Compute mean log income and CIs
+soep_k <- soep_final %>%
+  group_by(male, married) %>%
+  summarise(
+    mean_log_income = mean(log_income, na.rm = TRUE),
+    se_log = sd(log_income, na.rm = TRUE) / sqrt(n()),
+    ci_lower_log = mean_log_income - 1.96 * se_log,
+    ci_upper_log = mean_log_income + 1.96 * se_log,
+    .groups = "drop"
+  )
+
+# Plot with CIs
+p1 <- ggplot(soep_k, aes(x = as.factor(married), y = mean_log_income, fill = as.factor(male))) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.7), width = 0.6) +
+  geom_errorbar(
+    aes(ymin = ci_lower_log, ymax = ci_upper_log),
+    position = position_dodge(width = 0.7),
+    width = 0.25,
+    color = "black",
+    linewidth = 0.5
+  ) +
+  scale_x_discrete(labels = c("0" = "Not Married", "1" = "Married")) +
+  scale_fill_manual(
+    values = c("Female" = "red", "Male" = "blue"),  
+    labels = c("Female", "Male")
+  ) +
+  labs(
+    title = "Mean Log-Income by Marital Status and Gender (with 95% CIs)",
+    x = "Married",
+    y = "Log-Income",
+    fill = "Gender"
+  ) +
+  theme_minimal()
+
+
+soep_l <- soep_final %>%
+  group_by(relative_year, male) %>%
+  summarise(
+    log_mean_income = mean(log_income, na.rm = TRUE),
+    sd_log_income = sd(log_income, na.rm = TRUE),
+    n = sum(!is.na(log_income)),
+    se = sd_log_income / sqrt(n),
+    ci_lower = log_mean_income - 1.96 * se,
+    ci_upper = log_mean_income + 1.96 * se
+  ) %>%
+  ungroup()
+
+
+
+p2 <- ggplot(soep_l, aes(x = relative_year, y = log_mean_income, color = as.factor(male))) +
+  geom_line(size = 1) +
+  geom_point() +
+  geom_ribbon(
+    aes(ymin = ci_lower, ymax = ci_upper, fill = as.factor(male)), 
+    alpha = 0.2, 
+    color = NA) +
+  scale_x_continuous(limits = c(-15, 15)) +
+  scale_y_continuous(limits = c(5, 15)) +
+  scale_color_manual(
+    values = c("Female" = "red", "Male" = "blue"),
+    labels = c("Female", "Male")) +
+  scale_fill_manual(
+    values = c("Female" = "red", "Male" = "blue"), 
+    labels = c("Female", "Male")) +
+  labs(
+    title = "Mean Log-Income by Relative Year to Marriage (95% CIs)",
+    x = "Relative Year to Marriage",
+    y = "Mean Log-Income",
+    color = "Gender",
+    fill = "Gender") +
+  theme_minimal()
+
+
+#Combine and plot the pllts for the graphical analysis 
+combined_plot <- p1 + p2
+combined_plot
+```
+
+
+```{r}
+#OLS baseline model
+ols0 <- lm(log_income ~ year_1984, data = soep_final)
+summary(ols0)
+
+#OLS final Model 1
+ols1 <- lm(log_income ~ year_1984 + age_sd + age_squared_sd + education + married*male + transition_year, data = soep_final)
+summary(ols1)
+
+clustered_se <- cluster.vcov(ols1, cluster = soep_final[, c("id_id", "hh_id")])
+
+#OLS final Model 1 with clustered se
+ols1_clustered_se <- coeftest(ols1, vcov = clustered_se)
+summary(ols1_clustered_se)
+
+stargazer(ols1, ols1_clustered_se, type = "text")
+```
+
+
+```{r}
+#OLS final Model 2
+ols2 <- lm(log_income ~ year_1984 + education + relative_year_sd*male + relative_year_squared_sd*male , data = soep_final)
+summary(ols2)
+
+clustered_se2 <- cluster.vcov(ols2, cluster = soep_final[, c("id_id", "hh_id")])
+
+#OLS final Model 2 with clustered se
+ols2_clustered_se <- coeftest(ols2, vcov = clustered_se2)
+summary(ols2_clustered_se)
+
+stargazer(ols2, ols2_clustered_se, type = "text")
+```
+
+
+```{r}
+#Random Intercept
+ml1 <- lmer(log_income ~ year_1984 + (1|hh_id) + (1|id_id), data = soep_final, REML = F)
+summary(ml1) 
+icc(ml1) 
+
+#+key level 1 predictor
+ml2 <- lmer(log_income ~ year_1984 + married  + (1|hh_id) + (1|id_id), data = soep_final, REML = F)
+summary(ml2)
+
+#+ level 1 control variables
+ml3 <- lmer(log_income ~ year_1984 + age_sd + age_squared_sd + education + married + (1|hh_id) + (1|id_id), data = soep_final, REML = F)
+summary(ml3)
+
+#+key level 2 predictor
+ml4 <- lmer(log_income ~ year_1984 + age_sd + age_squared_sd + education + married + male + (1|hh_id) + (1|id_id), data = soep_final, REML = F)
+summary(ml4)
+
+#+ level 2 control variables
+ml4a <- lmer(log_income ~ year_1984 + age_sd + age_squared_sd + education + married + male + transition_year + (1|hh_id) + (1|id_id), data = soep_final, REML = F)
+summary(ml4a)
+
+#+random slope
+ml5 <- lmer(log_income ~ year_1984 + age_sd + age_squared_sd + education + married + male + transition_year + (1| hh_id) + (1 + married | id_id), data = soep_final, REML = FALSE)
+summary(ml5)
+
+#+cross-level interaction 
+ml6 <- lmer(log_income ~  year_1984 + age_sd + age_squared_sd + education + married*male + transition_year + (1| hh_id) + (1 + married | id_id), data = soep_final, REML = F)
+summary(ml6)
+```
+
+
+
+```{r}
+#Safe estimated marginal effects
+emm <- emmeans(ml6, ~ married * male)
+
+
+# Get married effect within each gender:
+contrast(emm, method = "pairwise", by = "male")
+
+#Safe as dataframe
+emm_df <- as.data.frame(emm)
+
+
+#Back-transformed the log-transformed income (and confidence intervals)
+emm_df <- emm_df %>%
+  mutate(
+    emmean_expo = exp(emmean),
+    lower_expo = exp(asymp.LCL),
+    upper_expo = exp(asymp.UCL)
+  )
+
+
+#Plot the EMM
+ggplot(emm_df, aes(x = factor(married), y = emmean_expo, color = factor(male))) +
+  geom_point(position = position_dodge(0.3), size = 3) +
+  geom_errorbar(aes(ymin = lower_expo, ymax = upper_expo),
+                position = position_dodge(0.3), width = 0.2) +
+  scale_y_continuous(limits = c(0, 20000)) +
+  labs(
+    x = "Married", 
+    y = "Income (back-transformed)", 
+    color = "Gender"
+  ) +
+  scale_color_manual(
+    values = c("Female" = "red", "Male" = "blue"),
+    labels = c("Women", "Men")
+  ) +
+  scale_x_discrete(labels = c("Not married", "Married")) +
+  theme_minimal()
+```
+
+
+
+```{r}
+#+ key level 1 predictors
+rm1 <- lmer(log_income ~ year_1984 + relative_year_sd + relative_year_squared_sd + (1|hh_id) + (1|id_id), data = soep_final, REML = F)
+summary(rm1)
+
+#+level 1 control variables
+rm1a <- lmer(log_income ~ year_1984  + education + relative_year_sd + relative_year_squared_sd + (1|hh_id) + (1|id_id), data = soep_final, REML = F)
+summary(rm1a)
+
+#+key level 2 predictor
+rm2 <- lmer(log_income ~ year_1984  + education + relative_year_sd + relative_year_squared_sd + male + (1|hh_id) + (1|id_id), data = soep_final, REML = F)
+summary(rm2)
+
+#+random slope
+rm3 <- lmer(log_income ~  year_1984 + education + relative_year_sd + relative_year_squared_sd + male + (1| hh_id) + (1 + relative_year_sd | id_id), data = soep_final, REML = FALSE)
+summary(rm3)
+
+#+random slope
+rm4 <- lmer(log_income ~ year_1984  + education + relative_year_sd + relative_year_squared_sd + male + (1| hh_id) + (1 + relative_year_squared_sd | id_id), data = soep_final, REML = FALSE)
+summary(rm4)
+
+#+random slope 
+rm4b <- lmer(log_income ~ year_1984 + education + relative_year_sd + relative_year_squared_sd + male + (1| hh_id) + (1 + relative_year_sd + relative_year_squared_sd| id_id), data = soep_final, REML = F)
+summary(rm4b)
+
+#+cross-level interaction 
+rm5 <- lmer(log_income ~ year_1984 + education + relative_year_sd*male + relative_year_squared_sd*male + (1| hh_id) + (1 + relative_year_sd + relative_year_squared_sd| id_id), data = soep_final, REML = F)
+summary(rm5)
+```
+
+
+```{r}
+#SD for relative year
+sd(soep_final$relative_year)
+```
+
+
+```{r}
+# # Create prediction data
+# new_data <- expand.grid(
+#   relative_year_sd = seq(-1.5, 1.5, by = 0.1), 
+#   male = factor(c("Female", "Male")),        
+#   year_1984 = c(0),
+#   education = "0"
+# )
+
+# new_data$relative_year_squared_sd <- new_data$relative_year_sd^2
+
+# # Ensure factors match model
+# new_data$male <- factor(new_data$male, levels = levels(soep_final$male))
+# new_data$education <- factor(new_data$education, levels = levels(soep_final$education))
+
+# # Predict with standard errors
+# pred <- predict(rm5, newdata = new_data, re.form = NA, se.fit = TRUE)
+
+# # Add predicted values and 95% CI
+# new_data$predicted_log_income <- pred$fit
+# new_data$se <- pred$se.fit
+# new_data$lower <- new_data$predicted_log_income - 1.96 * new_data$se
+# new_data$upper <- new_data$predicted_log_income + 1.96 * new_data$se
+
+# # Back-transform log-transformed income variable (and confidence intervals)
+# new_data$predicted_income <- exp(new_data$predicted_log_income)
+# new_data$lower_income <- exp(new_data$lower)
+# new_data$upper_income <- exp(new_data$upper)
+
+# # Plot the trajectories (back-transformed logged income)
+# ggplot(new_data, aes(x = relative_year_sd, y = predicted_income, color = male, fill = male)) +
+#   geom_line(size = 1.2) +
+#   geom_ribbon(aes(ymin = lower_income, ymax = upper_income), alpha = 0.2, color = NA) +
+#   labs(
+#     title = "Predicted Income Trajectories Over Time",
+#     x = "Standardized Relative Year",
+#     y = "Predicted Income",   
+#     color = "Gender",
+#     fill = "Gender"
+#   ) +
+#   scale_color_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+#   scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+#   theme_minimal(base_size = 14) +
+#   theme(
+#     axis.text.y = element_blank(),     
+#     axis.ticks.y = element_blank())
+
+# # Predict the trajectories (logged income)
+# ggplot(new_data, aes(x = relative_year_sd, y = predicted_log_income, color = male, fill = male)) +
+#   geom_line(size = 1.2) +
+#   geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, color = NA) +
+#   labs(
+#     title = "Predicted Log Income Trajectories Over Time",
+#     x = "Standardized Relative Year",
+#     y = "Predicted Log Income",
+#     color = "Gender",
+#     fill = "Gender"
+#   ) +
+#   scale_color_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+#   scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+#   theme_minimal(base_size = 14)
+
+# ggplot(new_data, aes(x = relative_year_sd, y = predicted_income, color = male, fill = male)) +
+#   geom_line(size = 1.2) +
+#   geom_ribbon(aes(ymin = lower_income, ymax = upper_income), alpha = 0.2, color = NA) +
+#   labs(
+#     title = "Predicted Income Trajectories Over Time",
+#     x = "Standardized Relative Year",
+#     y = "Predicted Income",   
+#     color = "Gender",
+#     fill = "Gender"
+#   ) +
+#   scale_color_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+#   scale_fill_manual(values = c("red", "blue"), labels = c("Women", "Men")) +
+#   theme_minimal(base_size = 14) +
+#   theme_minimal(base_size = 14)
+
+
+```
+
+
+```{r}
+#Inspect variance components
+dotplot(ranef(ml5))
+dotplot(ranef(rm4))
+dotplot(ranef(rm4b))
+```
+
+
+```{r}
+#Likelihood-Ratio Tests to compare the models with and without the random slopes 
+lrtest(ml5, ml4a)
+lrtest(rm2, rm3)
+lrtest(rm2, rm4)
+lrtest(rm3, rm4b)
+lrtest(rm4, rm4b)
+```
+
+
+```{r}
+#Variance in the effect of marriage status on income explained by gender  
+((as.data.frame(VarCorr(ml5))[2,4])-(as.data.frame(VarCorr(ml6))[2,4])) /
+(as.data.frame(VarCorr(ml5))[2,4])
+```
+
+```{r}
+# Extract variance components as data frames
+vc_ml5a <- as.data.frame(VarCorr(ml5))
+vc_ml6 <- as.data.frame(VarCorr(ml6))
+
+# Extract the random slope variance for 'marriedYes' at the individual level ("id_id")
+slope_var_ml5a <- vc_ml5a[vc_ml5a$grp == "id_id" & vc_ml5a$var1 == "marriedYes" & is.na(vc_ml5a$var2), "vcov"]
+slope_var_ml6 <- vc_ml6[vc_ml6$grp == "id_id" & vc_ml6$var1 == "marriedYes" & is.na(vc_ml6$var2), "vcov"]
+
+# Calculate proportional reduction in variance
+reduction_married <- (slope_var_ml5a - slope_var_ml6) / slope_var_ml5a
+
+# Show result
+reduction_married
+
+```
+
+
+
+```{r}
+# Extract random effect variance components as data frames
+vc_rm4b <- as.data.frame(VarCorr(rm4b))
+vc_rm5 <- as.data.frame(VarCorr(rm5))
+
+# Filter to individual-level random slopes (usually group = "id_id")
+slope_var_ry <- vc_rm4b[vc_rm4b$grp == "id_id" & vc_rm4b$var1 == "relative_year_sd" & is.na(vc_rm4b$var2), "vcov"]
+slope_var_ry2 <- vc_rm4b[vc_rm4b$grp == "id_id" & vc_rm4b$var1 == "relative_year_squared_sd" & is.na(vc_rm4b$var2), "vcov"]
+
+slope_var_ry_new <- vc_rm5[vc_rm5$grp == "id_id" & vc_rm5$var1 == "relative_year_sd" & is.na(vc_rm5$var2), "vcov"]
+slope_var_ry2_new <- vc_rm5[vc_rm5$grp == "id_id" & vc_rm5$var1 == "relative_year_squared_sd" & is.na(vc_rm5$var2), "vcov"]
+
+# Compute proportional reduction in variance for both slopes
+reduction_ry <- (slope_var_ry - slope_var_ry_new) / slope_var_ry
+reduction_ry2 <- (slope_var_ry2 - slope_var_ry2_new) / slope_var_ry2
+
+reduction_ry + reduction_ry2
+
+```
+
+```{r}
+#Assumptions OLS
+
+histogram(ols1$residuals)
+plot(ols1, which = 1:5)
+```
+
+
+
+
+
+#Assumptions multilevel models
+
+#Model 1 
+
+#Level 1
+
+#Normality
+```{r}
+#Level 1 residuals
+
+#Extract L1 residuals
+soep_final$l1resid <- residuals(ml6)
+
+#Extract standardized residuals 
+soep_final$l1_resid_std1 <- resid(ml6, type = "pearson", scale = TRUE)
+
+#Histogram L1 residuals 
+hist(soep_final$l1_resid_std1)
+
+#QQ Plot
+qqmath(ml6)
+```
+
+#Homoskedasticity
+```{r}
+plot(fitted(ml6), resid(ml6), 
+     xlab = "Fitted values", ylab = "Residuals", 
+     main = "Residuals vs. Fitted")
+abline(h = 0, col = "red")
+```
+
+
+#Level 2
+
+```{r}
+#Level 2 residuals 
+
+l2_data <- soep_final %>%
+group_by(id_id) %>% 
+mutate(log_income_mean = mean(log_income, na.rm = T)) %>% 
+dplyr::select(id_id, log_income_mean, male) %>%
+unique()
+
+#Random Intercept and Random Slope residuals 
+l2_data$l2_intercept_resid = ranef(ml6)$id_id [, 1]
+l2_data$l2_slope_resid = ranef(ml6)$id_id [, 2]
+```
+
+
+#Normality
+```{r}
+#Histogram
+histogram(l2_data$l2_intercept_resid)
+
+#QQ Plot
+qqmath(l2_data$l2_intercept_resid)
+
+
+#Histogram
+histogram(l2_data$l2_slope_resid)
+
+#QQ Plot
+qqmath(l2_data$l2_slope_resid)
+
+```
+
+
+#Homoskedasticity
+```{r}
+# Random intercepts
+l2_data$fitted_vals <- fitted(ml6)[match(l2_data$id_id, soep_final$id_id)]
+
+ggplot(l2_data, aes(x = fitted_vals, y = l2_intercept_resid)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  labs(title = "Random Intercepts vs. Fitted Values")
+
+
+
+# Random slopes
+ggplot(l2_data, aes(x = fitted_vals, y = l2_slope_resid)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  labs(title = "Random Intercepts vs. Fitted Values")
+```
+
+
+```{r}
+#Check whether the variance of the L1 residual errors is the same in all groups
+soep_final$abs.l1resid<-soep_final$l1residuals
+soep_final$abs.l1resid <- abs(soep_final$l1resid)
+soep_final$abs.l1resid2 <- soep_final$abs.l1resid^2
+
+soep_final$abs.l1resid2<-soep_final$abs.l1resid^2
+
+
+Levene.Model.F <- lm(abs.l1resid2 ~ id_id, data=soep_final)
+#ANOVA of the squared residuals
+anova(Levene.Model.F) #displays the results
+
+
+plot(ml6, id_id ~ resid(., scaled=TRUE))
+```
+
+
+
+
+```{r}
+# Independence of l1 residuals from level 2 predictors 
+
+soep_final$l1resid <- resid(ml6)
+
+ggplot(soep_final, aes(x = male, y = l1resid)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  labs(x = "Gender (Level 2)",
+       y = "Level-1 residuals",
+       title = "Are Level-1 residuals independent of gender?")
+
+leveneTest(l1resid ~ male, data = soep_final)
+```
+
+
+
+#Model 2
+
+#Level 1
+
+#Normality
+```{r}
+#Level 1 residuals
+
+#Extract L1 residuals
+soep_final$l1resid1 <- residuals(rm5)
+
+#Extract standardized residuals 
+soep_final$l1_resid_std2 <- resid(rm5, type = "pearson", scale = TRUE)
+
+#Histogram L1 residuals 
+hist(soep_final$l1_resid_std2)
+
+#QQ Plot
+qqmath(rm5)
+```
+
+#Homoskedasticity
+```{r}
+plot(fitted(ml6), resid(rm5), 
+     xlab = "Fitted values", ylab = "Residuals", 
+     main = "Residuals vs. Fitted")
+abline(h = 0, col = "red")
+```
+
+
+#Level 2
+
+```{r}
+#Level 2 residuals 
+
+l2_data <- soep_final %>%
+group_by(id_id) %>% 
+mutate(log_income_mean = mean(log_income, na.rm = T)) %>% 
+dplyr::select(id_id, log_income_mean, male) %>%
+unique()
+
+#Random Intercept and Random Slope residuals 
+l2_data$l2_intercept_resid1 = ranef(rm5)$id_id [, 1]
+l2_data$l2_slope_resid1 = ranef(rm5)$id_id [, 2]
+l2_data$l2_slope_resid2 = ranef(rm5)$id_id[, 3]
+```
+
+
+#Normality
+```{r}
+#Histogram
+histogram(l2_data$l2_intercept_resid1)
+
+#QQ Plot
+qqmath(l2_data$l2_intercept_resid1)
+
+
+#Histogram
+histogram(l2_data$l2_slope_resid1)
+
+#QQ Plot
+qqmath(l2_data$l2_slope_resid1)
+
+#Histogram
+histogram(l2_data$l2_slope_resid2)
+
+#QQ Plot
+qqmath(l2_data$l2_slope_resid2)
+
+```
+
+
+#Homoskedasticity
+```{r}
+# Random intercepts
+l2_data$fitted_vals1 <- fitted(rm5)[match(l2_data$id_id, soep_final$id_id)]
+
+ggplot(l2_data, aes(x = fitted_vals1, y = l2_intercept_resid1)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  labs(title = "Random Intercepts vs. Fitted Values")
+
+
+# Random slopes
+ggplot(l2_data, aes(x = fitted_vals1, y = l2_slope_resid1)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  labs(title = "Random Intercepts vs. Fitted Values")
+
+# Random slopes
+ggplot(l2_data, aes(x = fitted_vals1, y = l2_slope_resid2)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  labs(title = "Random Intercepts vs. Fitted Values")
+```
+
+
+```{r}
+#Check whether the variance of the L1 residual errors is the same in all groups
+soep_final$l1resid123 <- resid(rm5)
+
+soep_final$abs_l1resid1 <- abs(soep_final$l1resid123)
+soep_final$sq_l1resid  <- soep_final$abs_l1resid1^2
+
+
+Levene.Model.F1 <- lm(sq_l1resid ~ id_id, data=soep_final)
+#ANOVA of the squared residuals
+anova(Levene.Model.F1) #displays the results
+
+
+plot(rm5, id_id ~ resid(., scaled=TRUE))
+```
+
+
+
+
+```{r}
+# Independence of l1 residuals from level 2 predictors 
+ggplot(soep_final, aes(x = male, y = l1resid123)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  labs(x = "Gender (Level 2)",
+       y = "Level-1 residuals",
+       title = "Are Level-1 residuals independent of gender?")
+
+leveneTest(l1resid123 ~ male, data = soep_final)
+```
+
+
+
+
+
+```{r}
+#Intercept residuals and Slope residuals relation
+l2_data %>%
+ ggplot(mapping = aes(x = l2_intercept_resid1, y = l2_slope_resid2)) +
+ geom_point() +
+ labs(x = "slope residuals", y = "intercept resduals")
+
+cor.test(l2_data$l2_slope_resid2, as.numeric(l2_data$l2_intercept_resid1))
+```
+
+
+
+
+
+
+
+#Level 3
+
+
+```{r}
+#Level 2 residuals 
+
+l3_data <- soep_final %>%
+group_by(hh_id) %>% 
+mutate(log_income_mean = mean(log_income, na.rm = T)) %>% 
+dplyr::select(hh_id, log_income_mean) %>%
+unique()
+
+#Random Intercept and Random Slope residuals 
+l3_data$l2_intercept_resid3 = ranef(ml6)$hh_id [, 1]
+l3_data$l2_intercept_resid4 = ranef(rm5)$hh_id [, 1]
+
+```
+
+
+#Normality
+```{r}
+#Histogram
+histogram(l3_data$l2_intercept_resid3)
+
+#QQ Plot
+qqmath(l3_data$l2_intercept_resid3)
+
+
+#Histogram
+histogram(l3_data$l2_intercept_resid4)
+
+#QQ Plot
+qqmath(l3_data$l2_intercept_resid4)
+```
+
+
+#Homoskedasticity
+```{r}
+# Random intercepts
+l3_data$fitted_vals3 <- fitted(ml6)[match(l3_data$hh_id, soep_final$hh_id)]
+l3_data$fitted_vals4 <- fitted(rm5)[match(l3_data$hh_id, soep_final$hh_id)]
+
+ggplot(l3_data, aes(x = fitted_vals3, y = l2_intercept_resid3)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  labs(title = "Random Intercepts vs. Fitted Values")
+
+ggplot(l3_data, aes(x = fitted_vals4, y = l2_intercept_resid4)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  labs(title = "Random Intercepts vs. Fitted Values")
+```
+
+
+```{r}
+#Check whether the variance of the L1 residual errors is the same in all groups
+soep_final$l1resid3 <- resid(ml6)
+soep_final$l1resid4 <- resid(rm5)
+
+soep_final$abs_l1resid3 <- abs(soep_final$l1resid3)
+soep_final$sq_l1resid3  <- soep_final$abs_l1resid3^2
+
+soep_final$abs_l1resid4 <- abs(soep_final$l1resid4)
+soep_final$sq_l1resid4  <- soep_final$abs_l1resid4^2
+
+
+
+Levene.Model.F3 <- lm(sq_l1resid3 ~ hh_id, data=soep_final)
+#ANOVA of the squared residuals
+anova(Levene.Model.F3) #displays the results
+
+plot(ml6, hh_id ~ resid(., scaled=TRUE))
+
+
+Levene.Model.F4 <- lm(sq_l1resid4 ~ hh_id, data=soep_final)
+#ANOVA of the squared residuals
+anova(Levene.Model.F4) #displays the results
+
+plot(rm5, id_id ~ resid(., scaled=TRUE))
+```
+
+
+
+
+##Missing Data
+
+```{r}
+
+soep_fil1 <- soep_sub %>% 
+  filter(age >= 25 & age <= 60) 
+
+#Recode gender so that male = 1 and female = 0
+soep_fil1 <- soep_fil1 %>% 
+  mutate(male = case_when(
+    gender == 1 ~ 1, 
+    gender == 2 ~ 0,
+    TRUE ~ NA_real_))
+
+#Recode marital status so that single = 0 and married = 1 
+soep_fil1 <- soep_fil1 %>% 
+  mutate(marital_status = marital_status_unfinished - 1) %>% 
+  mutate(marital_status = case_when(
+    marital_status == 0 ~ 1, 
+    marital_status == 1 ~ 0,
+    TRUE ~ marital_status ))
+
+#Create a new variable for which single = 0, married = 1, and other = 2
+soep_fil1 <- soep_fil1 %>% 
+  mutate(marital_status_reduced = case_when(
+    marital_status == 0 ~ 0,
+    marital_status == 1 ~ 1, 
+    marital_status > 1 ~ 2
+  ))
+
+```
+
+
+```{r}
+#Filter the dataset for individuals that went from unmarried to married during the course of the panel 
+ids_changed1 <- soep_fil1 %>%
+  arrange(id_id, year) %>%
+  group_by(id_id) %>%
+  mutate(prev_marital_status = lag(marital_status_reduced)) %>%
+  filter(prev_marital_status == 0 & marital_status_reduced == 1) %>%
+  distinct(id_id) 
+
+soep_changed1 <- soep_fil1 %>%
+  filter(id_id %in% ids_changed$id_id)
+```
+
+
+```{r}
+#Determine the year in which the individual got married 
+soep_d1 <- soep_fil1 %>% 
+  arrange(id_id, year) %>% 
+  group_by(id_id) %>% 
+  mutate(prev_marital_status = lag(marital_status_reduced),
+         transition = prev_marital_status == 0 & marital_status_reduced == 1) %>% 
+  filter(transition) %>% 
+  slice(1) %>% 
+  dplyr::select(id_id, transition_year = year) 
+
+
+#Center the variable so that 0 = year of marriage 
+soep_final1 <- soep_fil1 %>% 
+  inner_join(soep_d, by = "id_id") %>% 
+  mutate(relative_year = year - transition_year) 
+
+soep_final1 <- soep_final1 %>% 
+  arrange(id_id, year) %>% 
+  group_by(id_id) %>% 
+  mutate(married = cummax(marital_status_reduced %in% c(1, 2)))
+
+soep_final_NA <- soep_final1 %>% 
+  dplyr::select(id_id, hh_id, income, age, year, education, gender, married, transition_year, relative_year)
+
+
+soep_final_NA <- soep_final_NA %>%
+  mutate(
+    income = ifelse(income < 0, NA, income),
+    gender = ifelse(gender < 0, NA, gender),
+    age = ifelse(age < 0, NA, age),
+    education = ifelse(education < 0, NA, education))
+```
+
+
+```{r}
+#Count observations on each level
+data.frame(
+  level1_observations = nrow(soep_final_NA),
+  level2_individuals = length(unique(soep_final_NA$id_id)),
+  level3_households = length(unique(soep_final_NA$hh_id)))
+```
+
+
+```{r}
+#Total number of missings
+sum(is.na(soep_final_NA))
+
+#Number of missings per variable
+colSums(is.na(soep_final_NA))
+
+#Pattern of missing values
+md.pattern(soep_final_NA, plot = F)
+
+#Proportion of missing values
+sum(is.na(soep_final_NA)) / (nrow(soep_final_NA) * ncol(soep_final_NA)) * 100
+
+
+#Number of missings on income variable
+sum(is.na(soep_final_NA$income))
+
+#Number of missings on education variable
+sum(is.na(soep_final_NA$education))
+
+#Proportion of missings on income variable
+sum(is.na(soep_final_NA$income)) / nrow(soep_final_NA) * 100
+
+#Proportion of missings on education variable
+sum(is.na(soep_final_NA$education)) / nrow(soep_final_NA) * 100
+
+#Missings on income by gender
+soep_final_NA %>%
+  mutate(income_missing = is.na(income)) %>%
+  group_by(gender) %>%
+  summarise(
+    percent_missing_income = mean(income_missing) * 100,
+    n = n())
+
+#Missings on education by gender
+soep_final_NA %>%
+  mutate(education_missing = is.na(education)) %>%
+  group_by(gender) %>%
+  summarise(
+    percent_missing_education = mean(education_missing) * 100,
+    n = n())
+
+#Income of observations with NA on education vs no NA
+soep_final_NA %>%
+  mutate(
+    education_missing = ifelse(is.na(education), "Missing", "Not Missing")
+  ) %>%
+  ggplot(aes(x = education_missing, y = income, fill = education_missing)) +
+  geom_boxplot(outlier.shape = NA) +
+  coord_cartesian(ylim = c(0, quantile(soep_final_NA$income, 0.95, na.rm = TRUE))) +  
+  labs(
+    x = "Education Missingness",
+    y = "Income",
+    title = "Income Distribution by Education Missingness",
+    fill = "Education Missings"
+  ) +
+  scale_fill_manual(values = c("Not Missing" = "skyblue", "Missing" = "salmon")) +
+  theme_minimal()
+
+
+
+#Little’s MCAR test 
+soep_final_NA_test <- soep_final_NA %>% 
+  dplyr::select(education, income, id_id, age, relative_year)
+
+mcar_test(soep_final_NA_test)
+
+```
+
+
+##Tables 
+
+```{r}
+#Descriptive Statistics 
+
+soep_desc <- soep_final %>% 
+  dplyr::select(log_income, married, relative_year, male, age, age_squared, transition_year, education)
+
+soep_desc <- as.data.frame(soep_desc)
+
+soep_desc$married <- as.numeric(soep_desc$married)
+soep_desc$male <- as.numeric(soep_desc$male)
+soep_desc$education <- as.numeric(soep_desc$education)
+
+soep_desc <- soep_desc %>% 
+  mutate(married = case_when(
+    married == 1 ~ 0,
+    married == 2 ~ 1,
+    TRUE ~ NA_real_)) %>% 
+  mutate(male = case_when(
+    male == 1 ~ 0,
+    male == 2 ~ 1,
+    TRUE ~ NA_real_))
+
+
+soep_desc <- soep_desc %>% 
+  mutate(education0 = case_when(
+    education == 1 ~ 1,
+    education == 2 ~ 0,
+    education == 3 ~ 0,
+    TRUE ~ NA_real_))
+
+soep_desc <- soep_desc %>% 
+  mutate(education1 = case_when(
+    education == 1 ~ 0,
+    education == 2 ~ 1,
+    education == 3 ~ 0,
+    TRUE ~ NA_real_))
+
+soep_desc <- soep_desc %>% 
+  mutate(education2 = case_when(
+    education == 1 ~ 0,
+    education == 2 ~ 0,
+    education == 3 ~ 1,
+    TRUE ~ NA_real_))
+
+soep_desc <- soep_desc %>% 
+  dplyr::select(-c(education))
+
+
+#USE LATEX AND CHANGE N MANUALLY 
+stargazer(soep_desc, style = "asr", digits=1, title = "Table 1 Descriptives", out = "table1.html", covariate.labels = 
+        c("log Income", "Marital Status", "Relative Year to Marriage","Gender" , "Age", "Age Squared", "Year of Marriage", "Less than High School", "High School", "More than High School"))
+```
+
+
+
+```{r}
+#Presentation
+
+
+tab_model(
+  ml1, ml2, ml3, ml4, ml4a, ml5, ml6,
+  dv.labels = "Log Income",
+  show.re.var = TRUE,
+  show.ci = FALSE,
+  file = "M1.html",
+  pred.labels = c("Intercept", "Year", "Age", "Age Squared",
+                  "High School", "More Than High School",
+                  "Married", "Male",
+                  "Year of Marriage", "Married:Male"))
+
+
+
+tab_model(
+  ml1, rm1, rm1a, rm2, rm3, rm4, rm4b, rm5,
+  dv.labels = "Log Income",
+  show.re.var = TRUE,
+  show.ci = FALSE,
+  file = "M2.html",
+  pred.labels = c("Intercept","Year",
+                  "High School", "More Than High School",
+                  "Relative Year to Marriage", "Male", "Relative Year to Marriage Squared",
+                  "Relative Year to Marriage:Male", "Relative Year to Marriage Squared:Male"))
+```
+
