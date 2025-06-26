@@ -1,0 +1,1 @@
+# Statistical-Model-in-the-Social-Sciences-
